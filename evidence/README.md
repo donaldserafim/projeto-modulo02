@@ -19,6 +19,7 @@ A imagem-base é histórica e intencionalmente vulnerável. O achado concreto s�
 | Vulnerabilidade real e print | `trivy-before.json`, `trivy-before.txt`, `selected-finding.json`, `vulnerability.md` e `trivy-before.png` |
 | Assinatura e verificação | `signed-image.txt`, `cosign-sign.txt`, `cosign-verify.json`, `cosign-sbom.json` e `trusted-identity.txt` |
 | Rejeição da variante | `tampered-image.txt`, `cosign-tampered.stderr`, `cosign-tampered.exit-code` e `tampered-assertion.txt` |
+| Comandos shell capturados | `command-logs/*.log`; registros nativos das Actions `uses:` ficam na execução |
 | Rastreabilidade | `manifest.json`, `tool-versions.txt`, locks e `base-image.txt` |
 
 As assinaturas e atestações são publicadas no registry; os artifacts preservam os relatórios da operação e da verificação, não um pacote de verificação offline. Manter as imagens e seus dados de assinatura disponíveis para a avaliação.
