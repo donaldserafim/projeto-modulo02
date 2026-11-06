@@ -24,14 +24,14 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    env:
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
     steps:
       - name: Checkout
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Configurar cache do Trivy no runner
+        run: printf 'TRIVY_CACHE_DIR=%s/trivy-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Instalar OPA para politicas Rego
         id: setup_opa
         uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
