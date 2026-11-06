@@ -1,0 +1,9 @@
+# Se a cadeia fosse atacada amanhã, quais evidências existiriam?
+
+Após uma execução bem-sucedida no GitHub Actions, haveria um manifesto com commit analisado, workflow, URL e ID da execução, tentativa, horário UTC e checksums dos arquivos coletados. O digest da base identificaria a entrada do build; as inspeções, os testes Rego e os logs de UID mostrariam o usuário configurado e observado. Os SBOMs enumerariam componentes, e o Trivy registraria os achados conhecidos na data da análise, com metadados disponíveis do scanner e do banco.
+
+Na distribuição, `signed-image.txt` identificaria o digest publicado. Os relatórios Cosign comprovariam a verificação da assinatura e da atestação do SBOM, exigindo issuer do GitHub Actions e identidade exata do workflow na `main`. Para a variante modificada, ficariam registrados outro digest, acesso ao registry, diagnóstico de ausência de assinatura e código de retorno. Uma verificação positiva posterior da imagem legítima completaria o controle. O Summary reuniria os resultados e o link das evidências; o estado do manifesto seria o observado na coleta, antes do upload.
+
+Esses registros permitiriam comparar o conteúdo analisado, assinado e entregue. Não provariam a integridade do builder ou de uma conta autorizada: um workflow comprometido também pode assinar código malicioso, como ilustra o limite discutido no caso SolarWinds. SBOM e scanner não demonstram ausência de componentes ocultos ou vulnerabilidades desconhecidas.
+
+A retenção solicitada dos artifacts é de 90 dias, sujeita aos limites da conta. O usuário deve preservar a seleção final em `evidence/`, associada à URL e ao commit analisado, e manter as assinaturas no registry. Checksums ajudam a detectar alterações em relação ao manifesto preservado, sem torná-lo imutável. Este laboratório não alega certificação ou nível SLSA. Os resultados descritos continuam pendentes até a execução e conferência das evidências.
