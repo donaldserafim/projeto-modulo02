@@ -71,19 +71,22 @@ jobs:
           mkdir -p "$RUNNER_TEMP/command-logs"
           exec > >(tee -a "$RUNNER_TEMP/command-logs/02-policy.log") 2>&1
           set -x
-          set -euo pipefail
+          set -Eeuo pipefail
           mkdir -p artifacts
+          trap 'rc=$?; printf "Falha na linha %s (codigo %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" | tee artifacts/policy-error.txt; exit "$rc"' ERR
           opa test policies/ -v 2>&1 | tee artifacts/opa-tests.txt
           opa test policies/ --coverage --format=json > artifacts/opa-coverage.json
           # Antes: base historica. Depois e variante: a mesma base atualizada.
-          base_before=$(cat config/base-image.txt)
-          base_after=$(cat config/base-image-after.txt)
+          # Dockerfiles sao a fonte de verdade; nao depender de arquivos auxiliares.
+          base_before=$(sed -n 's/^FROM //p' scenarios/Dockerfile.before | tr -d '\r')
+          base_after=$(sed -n 's/^FROM //p' Dockerfile | tr -d '\r')
+          printf '%s\n' "$base_before" > artifacts/base-image.txt
+          printf '%s\n' "$base_after" > artifacts/base-image-after.txt
           [[ "$base_before" =~ @sha256:[a-f0-9]{64}$ ]]
           [[ "$base_after" =~ @sha256:[a-f0-9]{64}$ ]]
           [[ "$base_before" != "$base_after" ]]
-          [[ $(sed -n 's/^FROM //p' scenarios/Dockerfile.before) == "$base_before" ]]
           for file in Dockerfile scenarios/Dockerfile.tampered; do
-            [[ $(sed -n 's/^FROM //p' "$file") == "$base_after" ]]
+            [[ $(sed -n 's/^FROM //p' "$file" | tr -d '\r') == "$base_after" ]]
           done
           for variant in before after; do
             dockerfile=Dockerfile
@@ -204,7 +207,7 @@ jobs:
           finding = sorted(findings, key=lambda v: (rank.get(v.get("Severity"), 5), v["VulnerabilityID"]))[0]
           selection = {
               "analyzed_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "base_image": Path("config/base-image.txt").read_text().strip(),
+              "base_image": (root / "base-image.txt").read_text().strip(),
               "image": json.loads((root / "image-before.json").read_text()),
               "image_metadata": report.get("Metadata"),
               "finding": finding,
@@ -233,8 +236,8 @@ jobs:
               "newly_detected_after": sorted(after_index.keys() - before_index.keys()),
           }
           comparison = {
-              "base_before": Path("config/base-image.txt").read_text().strip(),
-              "base_after": Path("config/base-image-after.txt").read_text().strip(),
+              "base_before": (root / "base-image.txt").read_text().strip(),
+              "base_after": (root / "base-image-after.txt").read_text().strip(),
               "counts": {name: len(keys) for name, keys in groups.items()},
               "findings": {name: [dict(zip(["class", "type", "package", "id"], key)) for key in keys] for name, keys in groups.items()},
               "note": "Nao detectado depois nao prova correcao individual: pacotes podem ter sido atualizados ou removidos, e a cobertura do scanner varia entre bases.",
@@ -372,7 +375,7 @@ jobs:
           set -x
           set -euo pipefail
           mkdir -p artifacts
-          cp config/tools.lock.json config/actions.lock.json config/base-image*.txt artifacts/
+          cp config/tools.lock.json config/actions.lock.json artifacts/
           # Mesmo uma instalacao interrompida deve deixar um manifesto de execucao.
           collect_manifest() {
             set +x
@@ -602,7 +605,7 @@ jobs:
               stage_blocks.append(current)
           output_map = {
               "cache": ["command-logs/01-cache.log"],
-              "policy": ["command-logs/02-policy.log", "opa-tests.txt", "run-before.txt", "run-after.txt", "policy-before.json", "policy-after.json"],
+              "policy": ["command-logs/02-policy.log", "policy-error.txt", "opa-tests.txt", "run-before.txt", "run-after.txt", "policy-before.json", "policy-after.json"],
               "sbom_before": ["sbom-before.cdx.json"],
               "sbom_after": ["sbom-after.cdx.json"],
               "trivy_before": ["trivy-before.txt", "trivy-before.json"],
