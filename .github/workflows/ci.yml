@@ -27,6 +27,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Configurar cache do Trivy no runner
+        id: cache
         run: |
           mkdir -p "$RUNNER_TEMP/command-logs"
           exec > >(tee -a "$RUNNER_TEMP/command-logs/01-cache.log") 2>&1
@@ -259,6 +260,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           STEPS_JSON: ${{ toJSON(steps) }}
           ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+          WORKFLOW_FILE: .github/workflows/ci.yml
         shell: python
         run: |
           """Organiza resultados existentes no Job Summary; nunca executa testes."""
@@ -397,35 +399,100 @@ jobs:
               lines += ["", "**Etapas a revisar:** " + "; ".join(failed) + ". Consulte os logs, corrija a causa e repita o workflow."]
           if notes:
               lines += ["", "**Relatórios incompletos:** " + " ".join(notes)]
-          lines += ["", "<details>", "<summary>Saída da aplicação e testes Rego</summary>", "", "<pre>"]
-          for name in ("run-before.txt", "run-after.txt", "opa-tests.txt"):
-              lines += [html.escape(name), html.escape(read_text(name)[:6000]), ""]
-          lines += ["</pre>", "", "</details>", ""]
-          lines += ["", "## Comandos e saídas", "",
-                    "Expanda os registros abaixo para consultar os comandos shell e as saídas capturadas dos steps run. Comandos com saída redirecionada têm seus resultados nos arquivos de evidência correspondentes.", "",
-                    f"[Abrir logs completos, incluindo as Actions uses e o próprio Summary]({run_url})", "",
-                    "Os comandos internos das Actions uses são registrados pelo GitHub nos logs de cada Action; não são capturados integralmente por este painel. Tokens de autenticação não são incluídos no rastreamento.", "",
-                    "Trechos longos são limitados aqui. Os arquivos completos capturados ficam no artifact; os logs nativos ficam na execução."]
-          log_files = sorted((root / "command-logs").glob("*.log"))
-          output_files = sorted(file for file in root.iterdir() if file.is_file() and file.suffix in (".txt", ".json", ".stderr", ".exit-code", ".log", ".md")) if root.exists() else []
+          lines += ["", "## Execução detalhada por etapa", "",
+                    "Cada etapa reúne sua definição no workflow e as saídas correspondentes. Trechos extensos têm limite de exibição; os registros completos capturados estão no artifact."]
+          workflow_path = Path(os.environ["WORKFLOW_FILE"])
+          source_lines = workflow_path.read_text().splitlines()
+          stage_blocks = []
+          current = None
+          for source_line in source_lines:
+              if source_line.startswith("      - name: "):
+                  if current is not None:
+                      stage_blocks.append(current)
+                  current = [source_line]
+              elif current is not None:
+                  current.append(source_line)
+          if current is not None:
+              stage_blocks.append(current)
+          output_map = {
+              "cache": ["command-logs/01-cache.log"],
+              "policy": ["command-logs/02-policy.log", "opa-tests.txt", "run-before.txt", "run-after.txt", "policy-before.json", "policy-after.json"],
+              "sbom_before": ["sbom-before.cdx.json"],
+              "sbom_after": ["sbom-after.cdx.json"],
+              "trivy_before": ["trivy-before.txt", "trivy-before.json"],
+              "trivy_after": ["trivy-after.txt", "trivy-after.json"],
+              "reports": ["command-logs/03-reports.log", "vulnerability.md", "screenshot.log"],
+              "registry": ["command-logs/04-registry.log"],
+              "publish": ["command-logs/05-publish.log", "push-after.txt", "signed-image.txt", "policy-published.json"],
+              "sbom_published": ["sbom-published.cdx.json"],
+              "sign_verify": ["command-logs/06-sign-verify.log", "cosign-sign.txt", "cosign-verify.json", "cosign-verify.stderr", "cosign-attest.txt", "cosign-sbom.json", "cosign-sbom.stderr", "tampered-assertion.txt", "cosign-tampered.stderr", "cosign-tampered.exit-code", "cosign-verify-after-attack.json"],
+              "collect": ["command-logs/07-collect.log", "tool-versions.txt", "manifest.json"],
+          }
           remaining_bytes = 350_000
-          for file in log_files + output_files:
-              limit = 12_000 if file.parent.name == "command-logs" else 5_000
-              with file.open(errors="replace") as output:
-                  excerpt = output.read(limit + 1)
-              truncated = len(excerpt) > limit
-              snippet = html.escape(excerpt[:limit])
-              block = ["", "<details>", f"<summary>{cell(file.relative_to(root))}</summary>", "", "<pre>", snippet, "</pre>"]
-              if truncated:
-                  block += ["", "Trecho limitado; consulte o arquivo completo no artifact."]
-              block += ["", "</details>"]
-              size = len("\n".join(block).encode("utf-8"))
-              if size > remaining_bytes:
-                  lines += ["", "Limite de exibição atingido. Os demais registros estão disponíveis no artifact e nos logs da execução."]
-                  break
-              remaining_bytes -= size
-              lines += block
-          if not log_files:
-              lines += ["", "Nenhum registro de comandos foi coletado; consulte os logs da execução."]
+          for number, block in enumerate(stage_blocks, 1):
+              title = block[0].split("- name: ", 1)[1]
+              if title == "Publicar Job Summary":
+                  continue
+              step_id = next((line.strip().split(": ", 1)[1] for line in block if line.startswith("        id: ")), "")
+              action = next((line.strip() for line in block if line.startswith("        uses: ")), None)
+              stage_status = labels.get(outcome(step_id), cell(outcome(step_id)))
+              lines += ["", f"### {number}. {cell(title)}", "", f"**Status:** {stage_status}", ""]
+              if action:
+                  definition = [action]
+                  copying = False
+                  for line in block[1:]:
+                      if line.startswith("        with:"):
+                          copying = True
+                          definition.append("with:")
+                      elif copying and line.startswith("          "):
+                          definition.append(line[8:])
+                      elif copying:
+                          break
+                  command = "\n".join(definition)
+                  lines += ["**Action e parâmetros:**", "", "<pre>", html.escape(command), "</pre>", "",
+                            f"[Logs dos comandos internos desta Action]({run_url})", ""]
+              else:
+                  run_index = next((i for i, line in enumerate(block) if line.startswith("        run:")), None)
+                  if run_index is None:
+                      command = "Definição indisponível; consulte o workflow."
+                  elif block[run_index].strip() == "run: |":
+                      command_lines = []
+                      for line in block[run_index + 1:]:
+                          if line and not line.startswith("          "):
+                              break
+                          command_lines.append(line[10:] if line else "")
+                      command = "\n".join(line for line in command_lines if not line.startswith(("exec > >(tee", "mkdir -p \"$RUNNER_TEMP/command-logs", "set -x")))
+                  else:
+                      command = block[run_index].split("run:", 1)[1].strip()
+                  lines += ["**Comandos:**", "", "<pre>", html.escape(command[:16000]), "</pre>"]
+              lines += ["", "**Saídas desta etapa:**", ""]
+              found = False
+              for name in output_map.get(step_id, []):
+                  file = root / name
+                  if not file.is_file():
+                      continue
+                  found = True
+                  with file.open(errors="replace") as output:
+                      excerpt = output.read(8001)
+                  truncated = len(excerpt) > 8000
+                  if name.startswith("command-logs/"):
+                      excerpt = "\n".join(line for line in excerpt.splitlines() if not line.startswith("+"))
+                  rendered = [f"*{cell(file.name)}*", "", "<pre>", html.escape(excerpt[:8000]), "</pre>", ""]
+                  if truncated:
+                      rendered += ["Trecho limitado; saída completa no artifact.", ""]
+                  size = len("\n".join(rendered).encode("utf-8"))
+                  if size > remaining_bytes:
+                      lines += ["Limite de exibição das saídas atingido; consulte o artifact e os logs.", ""]
+                      break
+                  remaining_bytes -= size
+                  lines += rendered
+              if not found:
+                  if step_id == "evidence" and artifact_url:
+                      lines += [f"[Pacote de evidências gerado]({artifact_url})", ""]
+                  elif outcome(step_id) == "skipped":
+                      lines += ["Etapa não executada; não há saída produzida.", ""]
+                  else:
+                      lines += [f"[Consultar a saída nos logs desta etapa]({run_url})", ""]
+          lines += ["", "Os parâmetros acima são a definição versionada; os valores resolvidos e os comandos realmente percorridos pelo shell estão nos registros capturados. Tokens são omitidos. Os logs do upload e deste próprio Summary ficam na execução do GitHub."]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("\n".join(lines))
