@@ -1,13 +1,18 @@
+# Pipeline unico do projeto: politica, inventario, vulnerabilidades e assinatura.
+# Todas as evidencias e o Summary sao gerados no GitHub Actions.
 name: Supply chain
 
+# Publica somente a partir da main; a execucao manual tambem exige essa branch.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+# Leitura por padrao. Escrita no GHCR e OIDC sao concedidos apenas ao job abaixo.
 permissions:
   contents: read
 
+# Evita publicacoes concorrentes do mesmo workflow e referencia.
 concurrency:
   group: supply-chain-${{ github.ref }}
   cancel-in-progress: false
@@ -25,11 +30,16 @@ jobs:
       packages: write
       id-token: write
     steps:
+
+      # 01 - Obtem os arquivos do commit analisado, sem persistir credenciais Git.
       - name: Checkout
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # 02 - Compartilha a pasta temporaria do banco entre scans desta execucao.
+      # cache:false nas Actions nao preserva o banco entre execucoes.
       - name: Configurar cache do Trivy no runner
         id: cache
         run: |
@@ -37,17 +47,24 @@ jobs:
           exec > >(tee -a "$RUNNER_TEMP/command-logs/01-cache.log") 2>&1
           set -x
           printf 'TRIVY_CACHE_DIR=%s/trivy-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # 03 - Prepara o motor das politicas Rego com Action por SHA e versao fixa.
       - name: Instalar OPA para politicas Rego
         id: setup_opa
         uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
         with:
           version: '1.22.1'
           static: true
+
+      # 04 - Prepara assinatura keyless e verificacao de integridade e identidade.
       - name: Instalar Cosign
         id: setup_cosign
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.4
+
+      # 05 - Passo 1 do enunciado: testa Rego, constroi as imagens e confere o UID.
+      # Root deve ser rejeitado e UID 10001 aceito: ambas sao assercoes de sucesso.
       - name: Politicas e demonstracao antes/depois
         id: policy
         run: |
@@ -83,6 +100,8 @@ jobs:
               jq -e '.result[0].expressions[0].value | type == "array" and length == 0' "artifacts/policy-$variant.json"
             fi
           done
+
+      # 06 - Passo 2: inventario CycloneDX dos pacotes da imagem inicial.
       - name: Syft - SBOM da imagem before
         id: sbom_before
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -94,6 +113,8 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+
+      # 07 - Inventario da imagem com UID corrigido; a base continua historica.
       - name: Syft - SBOM da imagem after
         id: sbom_after
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -105,6 +126,9 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+
+      # 08 - Analisa CVEs da imagem inicial. Achados sao intencionais no laboratorio.
+      # exit-code:0 permite guardar o relatorio; uma assercao posterior exige um achado real.
       - name: Trivy - imagem before
         id: trivy_before
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -122,6 +146,8 @@ jobs:
           skip-setup-trivy: false
         env:
           TRIVY_IMAGE_SRC: docker
+
+      # 09 - Analisa a imagem final e reaproveita a instalacao do Trivy.
       - name: Trivy - imagem after
         id: trivy_after
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -139,6 +165,9 @@ jobs:
           skip-setup-trivy: true
         env:
           TRIVY_IMAGE_SRC: docker
+
+      # 10 - Valida SBOMs, exige um achado real e gera ficha, tabela e print.
+      # A captura usa o relatorio real no runner; nao simula resultados.
       - name: Validar inventarios e preparar evidencias do Trivy
         id: reports
         run: |
@@ -193,6 +222,9 @@ jobs:
             --screenshot="$PWD/artifacts/trivy-before.png" --window-size=1600,1200 \
             "file://$PWD/artifacts/trivy-report.html" > artifacts/screenshot.log 2>&1
           [[ -s artifacts/trivy-before.png ]]
+
+      # 11 - Autentica com GITHUB_TOKEN para publicar as imagens do laboratorio.
+      # Nunca habilitar set -x ao expandir o token neste step.
       - name: Login no GHCR
         id: registry
         env:
@@ -203,6 +235,9 @@ jobs:
           exec > >(tee -a "$RUNNER_TEMP/command-logs/04-registry.log") 2>&1
           printf '%s\n' 'Comando: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin (token omitido)'
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # 12 - Publica a imagem ja testada, obtem o digest e reaplica o gate Rego.
+      # Nao reconstruir entre a validacao e a assinatura.
       - name: Publicar imagem validada
         id: publish
         run: |
@@ -225,6 +260,8 @@ jobs:
           opa eval --format=json --data policies/image_user.rego --input artifacts/published-image.json 'data.supply.image.deny' > artifacts/policy-published.json
           jq -e '.result[0].expressions[0].value | type == "array" and length == 0' artifacts/policy-published.json
           printf 'image=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+      # 13 - Gera o inventario da referencia exata que sera assinada.
       - name: Syft - SBOM da imagem publicada por digest
         id: sbom_published
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -236,6 +273,10 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+
+      # 14 - Passo 3: assina por OIDC e exige issuer e identidade exatos.
+      # A variante recebe um marcador, outro digest e nenhuma assinatura.
+      # Sua rejeicao so conta se a imagem existir e o motivo for ausencia de assinatura confiavel.
       - name: Assinar, verificar e rejeitar adulteracao
         id: sign_verify
         env:
@@ -290,6 +331,9 @@ jobs:
           verify > artifacts/cosign-verify-after-attack.json 2> artifacts/cosign-verify-after-attack.stderr
           jq -e 'length > 0' artifacts/cosign-verify-after-attack.json
           printf '%s\n' "$identity" > artifacts/trusted-identity.txt
+
+      # 15 - Passo 4: preserva logs, versoes e checksums, mesmo apos falha.
+      # O manifesto fotografa o estado na coleta, antes do upload.
       - name: Registrar evidencias e resumo
         id: collect
         if: always()
@@ -346,6 +390,8 @@ jobs:
               fi
             done
           } > artifacts/tool-versions.txt 2>&1
+
+      # 16 - Publica os arquivos coletados para download; solicita retencao de 90 dias.
       - name: Preservar artifacts
         id: evidence
         if: always()
@@ -355,6 +401,10 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 90
+
+      # 17 - Organiza os resultados por etapa com comandos e saidas.
+      # Verde indica assercao concluida; vermelho indica falha ou vulnerabilidade.
+      # Um CVE vermelho e um achado; nao implica falha do laboratorio.
       - name: Publicar Job Summary
         if: always()
         env:
@@ -407,7 +457,7 @@ jobs:
               return steps.get(step, {}).get("outcome", "skipped")
 
 
-          labels = {"success": "✅ Concluído", "failure": "❌ Falhou", "cancelled": "⏹ Cancelado", "skipped": "➖ Não executado"}
+          labels = {"success": "🟢 OK", "failure": "🔴 Falhou", "cancelled": "🟠 Cancelado", "skipped": "⚪ Não executado"}
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           status = os.environ.get("JOB_STATUS", "unknown")
           lines = [f"# Raio-X da Cadeia de Suprimentos — {cell(os.environ['GITHUB_WORKFLOW'])}", "",
@@ -415,17 +465,16 @@ jobs:
                    f"[Execução e logs]({run_url}) · Tentativa {cell(os.environ['GITHUB_RUN_ATTEMPT'])}", "",
                    f"**Commit analisado:** `{cell(os.environ['GITHUB_SHA'])}`", "",
                    "## Controles e etapas", "", "| Etapa | Resultado |", "|---|---|"]
-          controls = [("checkout", "Checkout"), ("setup_opa", "Instalação OPA / Rego"), ("setup_cosign", "Instalação Cosign"),
+          controls = [("checkout", "Checkout"), ("cache", "Pasta temporária do Trivy"), ("setup_opa", "Instalação OPA / Rego"), ("setup_cosign", "Instalação Cosign"),
                       ("policy", "Testes Rego, builds, UID e gates antes/depois"), ("sbom_before", "Syft: SBOM antes"),
                       ("sbom_after", "Syft: SBOM depois"), ("trivy_before", "Trivy: scan antes"), ("trivy_after", "Trivy: scan depois"),
                       ("reports", "Validação dos inventários, achado real e print")]
-          if "publish" in steps:
-              controls += [("registry", "Acesso ao GHCR"), ("publish", "Publicação e gate da imagem por digest"),
-                           ("sbom_published", "Syft: SBOM da imagem publicada"), ("sign_verify", "Assinatura, atestação e rejeição de adulteração")]
+          controls += [("registry", "Acesso ao GHCR"), ("publish", "Publicação e gate da imagem por digest"),
+                       ("sbom_published", "Syft: SBOM da imagem publicada"), ("sign_verify", "Assinatura, atestação e rejeição de adulteração")]
           controls += [("collect", "Coleta e manifesto de evidências"), ("evidence", "Upload dos artifacts")]
           for step, title in controls:
               lines.append(f"| {title} | {labels.get(outcome(step), cell(outcome(step)))} |")
-          lines += ["", "Rejeições esperadas fazem parte dos testes. Um scan concluído não significa ausência de CVEs.", "",
+          lines += ["", "🟢 OK · 🔴 Falha · 🟠 Cancelado · ⚪ Não executado. Rejeições esperadas são sucesso dos testes; CVEs em vermelho são achados e não falha automática do pipeline.", "",
                     "## Antes e depois", "", "| Indicador | Antes | Depois |", "|---|---|---|"]
           images = [read_json(f"image-{v}.json") for v in ("before", "after")]
           users = [cell(image.get("config", {}).get("User", "Não informado")) if isinstance(image, dict) else "Não produzido" for image in images]
@@ -435,9 +484,9 @@ jobs:
               data = read_json(f"policy-{variant}.json")
               try:
                   violations = data["result"][0]["expressions"][0]["value"]
-                  policies.append(f"{len(violations)} violação(ões) observada(s)")
+                  policies.append(f"{'🔴' if violations else '🟢'} {len(violations)} violação(ões) observada(s)")
               except (TypeError, KeyError, IndexError):
-                  policies.append("Não produzido / incompleto")
+                  policies.append("⚪ Não produzido / incompleto")
           lines.append(f"| Rego | {policies[0]} | {policies[1]} |")
           components = []
           for variant in ("before", "after"):
@@ -451,9 +500,9 @@ jobs:
               data = read_json(f"trivy-{variant}.json")
               counts.append(Counter(v.get("Severity", "UNKNOWN") for result in (data.get("Results") or []) for v in (result.get("Vulnerabilities") or [])) if isinstance(data, dict) else None)
           for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
-              values = [str(c[severity]) if c is not None else "Não produzido" for c in counts]
+              values = [f"{'🔴' if c[severity] else '🟢'} {c[severity]}" if c is not None else "⚪ Não produzido" for c in counts]
               lines.append(f"| {severity} | {values[0]} | {values[1]} |")
-          values = [str(sum(c.values())) if c is not None else "Não produzido" for c in counts]
+          values = [f"{'🔴' if sum(c.values()) else '🟢'} {sum(c.values())}" if c is not None else "⚪ Não produzido" for c in counts]
           lines += [f"| **Total de ocorrências** | **{values[0]}** | **{values[1]}** |", "",
                     "As contagens representam ocorrências por pacote e alvo. Remover root não corrige os pacotes da base histórica."]
           selected = read_json("selected-finding.json")
@@ -468,19 +517,16 @@ jobs:
           else:
               lines += ["", "Achado selecionado ainda não produzido. Consulte o status dos scans e da preparação de relatórios."]
 
-          if "publish" in steps:
-              passed = outcome("sign_verify") == "success"
-              lines += ["", "## Integridade e procedência — Cosign", "",
-                        "| Verificação | Resultado |", "|---|---|",
-                        f"| Imagem legítima, identidade e atestação SBOM | {'✅ Verificadas' if passed else 'Não comprovadas nesta execução; consultar logs'} |",
-                        f"| Variante adulterada acessível e sem assinatura confiável | {'✅ Rejeitada pelo motivo esperado' if passed else 'Não comprovada nesta execução; consultar logs'} |",
-                        f"| Código de retorno do teste negativo | {cell(read_text('cosign-tampered.exit-code'))} |", "",
-                        f"**Imagem publicada:** `{cell(read_text('signed-image.txt'))}`", "",
-                        f"**Variante adulterada:** `{cell(read_text('tampered-image.txt'))}`", "",
-                        f"**Identidade confiável:** `{cell(read_text('trusted-identity.txt'))}`", "",
-                        "Código diferente de zero sozinho não comprova rejeição por ausência de assinatura; o diagnóstico e os controles positivos também precisam passar."]
-          else:
-              lines += ["", "## Integridade e procedência — Cosign", "", "Publicação e assinatura pertencem ao workflow **Supply chain**; não são executadas neste CI."]
+          passed = outcome("sign_verify") == "success"
+          lines += ["", "## Integridade e procedência — Cosign", "",
+                    "| Verificação | Resultado |", "|---|---|",
+                    f"| Imagem legítima, identidade e atestação SBOM | {'🟢 Verificadas' if passed else labels.get(outcome('sign_verify'), '⚪ Indisponível') + ' — consultar logs'} |",
+                    f"| Variante adulterada acessível e sem assinatura confiável | {'🟢 Rejeitada pelo motivo esperado' if passed else labels.get(outcome('sign_verify'), '⚪ Indisponível') + ' — consultar logs'} |",
+                    f"| Código de retorno do teste negativo | {cell(read_text('cosign-tampered.exit-code'))} |", "",
+                    f"**Imagem publicada:** `{cell(read_text('signed-image.txt'))}`", "",
+                    f"**Variante adulterada:** `{cell(read_text('tampered-image.txt'))}`", "",
+                    f"**Identidade confiável:** `{cell(read_text('trusted-identity.txt'))}`", "",
+                    "Código diferente de zero sozinho não comprova rejeição por ausência de assinatura; o diagnóstico e os controles positivos também precisam passar."]
 
           lines += ["", "## Evidências e próximos passos", ""]
           artifact_url = os.environ.get("ARTIFACT_URL", "")
