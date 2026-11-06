@@ -27,7 +27,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Configurar cache do Trivy no runner
-        run: printf 'TRIVY_CACHE_DIR=%s/trivy-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        run: |
+          mkdir -p "$RUNNER_TEMP/command-logs"
+          exec > >(tee -a "$RUNNER_TEMP/command-logs/01-cache.log") 2>&1
+          set -x
+          printf 'TRIVY_CACHE_DIR=%s/trivy-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Instalar OPA para politicas Rego
         id: setup_opa
         uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
@@ -42,6 +46,9 @@ jobs:
       - name: Politicas e demonstracao antes/depois
         id: policy
         run: |
+          mkdir -p "$RUNNER_TEMP/command-logs"
+          exec > >(tee -a "$RUNNER_TEMP/command-logs/02-policy.log") 2>&1
+          set -x
           set -euo pipefail
           mkdir -p artifacts
           opa test policies/ -v 2>&1 | tee artifacts/opa-tests.txt
@@ -130,6 +137,9 @@ jobs:
       - name: Validar inventarios e preparar evidencias do Trivy
         id: reports
         run: |
+          mkdir -p "$RUNNER_TEMP/command-logs"
+          exec > >(tee -a "$RUNNER_TEMP/command-logs/03-reports.log") 2>&1
+          set -x
           set -euo pipefail
           for variant in before after; do
             jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "artifacts/sbom-$variant.cdx.json"
@@ -184,11 +194,17 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
+          mkdir -p "$RUNNER_TEMP/command-logs"
+          exec > >(tee -a "$RUNNER_TEMP/command-logs/07-collect.log") 2>&1
+          set -x
           set -euo pipefail
           mkdir -p artifacts
           cp config/tools.lock.json config/actions.lock.json config/base-image.txt artifacts/
           # Mesmo uma instalacao interrompida deve deixar um manifesto de execucao.
           collect_manifest() {
+            set +x
+            mkdir -p artifacts/command-logs
+            cp "$RUNNER_TEMP/command-logs/"*.log artifacts/command-logs/
             python3 - <<'PY_MANIFEST'
           import datetime
           import hashlib
@@ -385,5 +401,31 @@ jobs:
           for name in ("run-before.txt", "run-after.txt", "opa-tests.txt"):
               lines += [html.escape(name), html.escape(read_text(name)[:6000]), ""]
           lines += ["</pre>", "", "</details>", ""]
+          lines += ["", "## Comandos e saídas", "",
+                    "Expanda os registros abaixo para consultar os comandos shell e as saídas capturadas dos steps run. Comandos com saída redirecionada têm seus resultados nos arquivos de evidência correspondentes.", "",
+                    f"[Abrir logs completos, incluindo as Actions uses e o próprio Summary]({run_url})", "",
+                    "Os comandos internos das Actions uses são registrados pelo GitHub nos logs de cada Action; não são capturados integralmente por este painel. Tokens de autenticação não são incluídos no rastreamento.", "",
+                    "Trechos longos são limitados aqui. Os arquivos completos capturados ficam no artifact; os logs nativos ficam na execução."]
+          log_files = sorted((root / "command-logs").glob("*.log"))
+          output_files = sorted(file for file in root.iterdir() if file.is_file() and file.suffix in (".txt", ".json", ".stderr", ".exit-code", ".log", ".md")) if root.exists() else []
+          remaining_bytes = 350_000
+          for file in log_files + output_files:
+              limit = 12_000 if file.parent.name == "command-logs" else 5_000
+              with file.open(errors="replace") as output:
+                  excerpt = output.read(limit + 1)
+              truncated = len(excerpt) > limit
+              snippet = html.escape(excerpt[:limit])
+              block = ["", "<details>", f"<summary>{cell(file.relative_to(root))}</summary>", "", "<pre>", snippet, "</pre>"]
+              if truncated:
+                  block += ["", "Trecho limitado; consulte o arquivo completo no artifact."]
+              block += ["", "</details>"]
+              size = len("\n".join(block).encode("utf-8"))
+              if size > remaining_bytes:
+                  lines += ["", "Limite de exibição atingido. Os demais registros estão disponíveis no artifact e nos logs da execução."]
+                  break
+              remaining_bytes -= size
+              lines += block
+          if not log_files:
+              lines += ["", "Nenhum registro de comandos foi coletado; consulte os logs da execução."]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("\n".join(lines))
