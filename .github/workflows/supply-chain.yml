@@ -505,7 +505,14 @@ jobs:
           for step, title in controls:
               lines.append(f"| {title} | {labels.get(outcome(step), cell(outcome(step)))} |")
           lines += ["", "🟢 OK · 🔴 Falha · 🟠 Cancelado · ⚪ Não executado. Rejeições esperadas são sucesso dos testes; CVEs em vermelho são achados e não falha automática do pipeline.", "",
-                    "## Antes e depois", "", "| Indicador | Antes | Depois |", "|---|---|---|"]
+                    "## Antes e depois da imagem Docker", "",
+                    "A comparação abaixo mostra duas alterações independentes na imagem da mesma aplicação:", "",
+                    "| Controle | Antes | Depois | O que comprova |", "|---|---|---|---|",
+                    "| Usuário de execução — Rego | Root, com UID 0 | Usuário não privilegiado, UID 10001 | A política deve rejeitar root e aceitar UID 10001; os logs conferem o UID em execução. |",
+                    "| Pacotes da base — Trivy | Alpine 3.18.0, histórica | Alpine 3.24.4, atualizada | Os scans mostram quais achados deixaram de aparecer, quais persistem e quais surgiram após atualizar a base. |", "",
+                    "**Remover root não corrige CVEs.** A troca de usuário reduz privilégios; atualizar a base modifica os pacotes e pode reduzir vulnerabilidades. Os resultados abaixo vêm desta execução, sem garantia prévia de zero CVEs.", "",
+                    "### Configuração observada nas imagens", "",
+                    "| Indicador | Antes: imagem inicial | Depois: imagem com controles |", "|---|---|---|"]
           before_base = read_text("base-image.txt")
           after_base = read_text("base-image-after.txt")
           lines.append(f"| Base da imagem | {cell(before_base)} | {cell(after_base)} |")
@@ -527,7 +534,7 @@ jobs:
               components.append(str(len(data.get("components") or [])) if isinstance(data, dict) else "Não produzido")
           lines.append(f"| Componentes no SBOM | {components[0]} | {components[1]} |")
           lines += ["", "A aprovação dos gates é indicada pelo status da etapa; dados parciais não comprovam aprovação.", "",
-                    "## Vulnerabilidades — Trivy", "", "| Severidade | Antes | Depois |", "|---|---|---|"]
+                    "## Antes e depois dos pacotes da base — Trivy", "", "Compara a base histórica Alpine 3.18.0 com a atualizada Alpine 3.24.4. As cores indicam achados do scanner, não o resultado da política de usuário.", "", "| Severidade | Antes: Alpine 3.18.0 | Depois: Alpine 3.24.4 |", "|---|---|---|"]
           counts = []
           for variant in ("before", "after"):
               data = read_json(f"trivy-{variant}.json")
@@ -541,7 +548,7 @@ jobs:
           comparison = read_json("trivy-comparison.json")
           if isinstance(comparison, dict):
               delta = comparison["counts"]
-              lines += ["", "### Efeito da atualização da base", "",
+              lines += ["", "### Quais achados mudaram após atualizar a base?", "",
                         "| Comparação dos achados por pacote e identificador | Quantidade |", "|---|---|",
                         f"| 🟢 Não detectados no depois | {delta['not_detected_after']} |",
                         f"| {'🔴' if delta['persistent'] else '🟢'} Persistentes | {delta['persistent']} |",
@@ -560,7 +567,9 @@ jobs:
               lines += ["", "Achado selecionado ainda não produzido. Consulte o status dos scans e da preparação de relatórios."]
 
           passed = outcome("sign_verify") == "success"
-          lines += ["", "## Integridade e procedência — Cosign", "",
+          lines += ["", "## Outra demonstração: imagem legítima versus adulterada — Cosign", "",
+                    "Este teste avalia integridade e identidade, separadamente do usuário e dos CVEs. A imagem legítima é a imagem do depois, com base atualizada e UID 10001, assinada pelo workflow. A variante usa a mesma base e UID, mas recebe um arquivo marcador, ganha outro digest e não é assinada.", "",
+                    "**Esperado:** aceitar a imagem legítima assinada e rejeitar a variante acessível sem assinatura confiável. Isso não comprova ausência de vulnerabilidades.", "",
                     "| Verificação | Resultado |", "|---|---|",
                     f"| Imagem legítima, identidade e atestação SBOM | {'🟢 Verificadas' if passed else labels.get(outcome('sign_verify'), '⚪ Indisponível') + ' — consultar logs'} |",
                     f"| Variante adulterada acessível e sem assinatura confiável | {'🟢 Rejeitada pelo motivo esperado' if passed else labels.get(outcome('sign_verify'), '⚪ Indisponível') + ' — consultar logs'} |",
