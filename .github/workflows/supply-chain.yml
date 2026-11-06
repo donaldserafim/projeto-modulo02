@@ -75,11 +75,15 @@ jobs:
           mkdir -p artifacts
           opa test policies/ -v 2>&1 | tee artifacts/opa-tests.txt
           opa test policies/ --coverage --format=json > artifacts/opa-coverage.json
-          # Garante que todos os cenarios usam a mesma base fixada por digest.
-          base=$(cat config/base-image.txt)
-          [[ "$base" =~ @sha256:[a-f0-9]{64}$ ]]
-          for file in Dockerfile scenarios/Dockerfile.before scenarios/Dockerfile.tampered; do
-            [[ $(sed -n 's/^FROM //p' "$file") == "$base" ]]
+          # Antes: base historica. Depois e variante: a mesma base atualizada.
+          base_before=$(cat config/base-image.txt)
+          base_after=$(cat config/base-image-after.txt)
+          [[ "$base_before" =~ @sha256:[a-f0-9]{64}$ ]]
+          [[ "$base_after" =~ @sha256:[a-f0-9]{64}$ ]]
+          [[ "$base_before" != "$base_after" ]]
+          [[ $(sed -n 's/^FROM //p' scenarios/Dockerfile.before) == "$base_before" ]]
+          for file in Dockerfile scenarios/Dockerfile.tampered; do
+            [[ $(sed -n 's/^FROM //p' "$file") == "$base_after" ]]
           done
           for variant in before after; do
             dockerfile=Dockerfile
@@ -114,7 +118,7 @@ jobs:
           upload-release-assets: false
           dependency-snapshot: false
 
-      # 07 - Inventario da imagem com UID corrigido; a base continua historica.
+      # 07 - Inventario da imagem com UID corrigido e base atualizada.
       - name: Syft - SBOM da imagem after
         id: sbom_after
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -211,8 +215,31 @@ jobs:
                    f"- Severidade: {finding['Severity']}", f"- Versao corrigida: {finding.get('FixedVersion') or 'nao informada'}",
                    f"- Advisory: {finding.get('PrimaryURL') or 'consultar References no JSON'}", "",
                    "O digest da base, ID da imagem construida no runner e os metadados do scanner estao em selected-finding.json.",
-                   "A imagem final altera o usuario; seus pacotes continuam sujeitos aos mesmos CVEs."]
+                   "A imagem final altera o usuario e atualiza a base; consultar trivy-comparison.json para os achados de cada scan."]
           (root / "vulnerability.md").write_text("\n".join(lines) + "\n")
+          # Compara os scans reais por alvo, tipo, pacote e identificador.
+          after_report = json.loads((root / "trivy-after.json").read_text())
+          def indexed_findings(scan):
+              return {
+                  (result.get("Class", ""), result.get("Type", ""), v.get("PkgName", ""), v["VulnerabilityID"]): v
+                  for result in (scan.get("Results") or [])
+                  for v in (result.get("Vulnerabilities") or [])
+              }
+          before_index = indexed_findings(report)
+          after_index = indexed_findings(after_report)
+          groups = {
+              "not_detected_after": sorted(before_index.keys() - after_index.keys()),
+              "persistent": sorted(before_index.keys() & after_index.keys()),
+              "newly_detected_after": sorted(after_index.keys() - before_index.keys()),
+          }
+          comparison = {
+              "base_before": Path("config/base-image.txt").read_text().strip(),
+              "base_after": Path("config/base-image-after.txt").read_text().strip(),
+              "counts": {name: len(keys) for name, keys in groups.items()},
+              "findings": {name: [dict(zip(["class", "type", "package", "id"], key)) for key in keys] for name, keys in groups.items()},
+              "note": "Nao detectado depois nao prova correcao individual: pacotes podem ter sido atualizados ou removidos, e a cobertura do scanner varia entre bases.",
+          }
+          (root / "trivy-comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
           # Visualizacao do relatorio real para leitura no navegador; nao e um print fabricado.
           table = (root / "trivy-before.txt").read_text()
           (root / "trivy-report.html").write_text('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Trivy — imagem inicial</title><h1>Resultado real do Trivy</h1><pre>' + html.escape('\n'.join(lines) + '\n\n' + table) + '</pre></html>')
@@ -345,7 +372,7 @@ jobs:
           set -x
           set -euo pipefail
           mkdir -p artifacts
-          cp config/tools.lock.json config/actions.lock.json config/base-image.txt artifacts/
+          cp config/tools.lock.json config/actions.lock.json config/base-image*.txt artifacts/
           # Mesmo uma instalacao interrompida deve deixar um manifesto de execucao.
           collect_manifest() {
             set +x
@@ -476,6 +503,9 @@ jobs:
               lines.append(f"| {title} | {labels.get(outcome(step), cell(outcome(step)))} |")
           lines += ["", "🟢 OK · 🔴 Falha · 🟠 Cancelado · ⚪ Não executado. Rejeições esperadas são sucesso dos testes; CVEs em vermelho são achados e não falha automática do pipeline.", "",
                     "## Antes e depois", "", "| Indicador | Antes | Depois |", "|---|---|---|"]
+          before_base = read_text("base-image.txt")
+          after_base = read_text("base-image-after.txt")
+          lines.append(f"| Base da imagem | {cell(before_base)} | {cell(after_base)} |")
           images = [read_json(f"image-{v}.json") for v in ("before", "after")]
           users = [cell(image.get("config", {}).get("User", "Não informado")) if isinstance(image, dict) else "Não produzido" for image in images]
           lines.append(f"| USER da imagem | {users[0]} | {users[1]} |")
@@ -504,7 +534,16 @@ jobs:
               lines.append(f"| {severity} | {values[0]} | {values[1]} |")
           values = [f"{'🔴' if sum(c.values()) else '🟢'} {sum(c.values())}" if c is not None else "⚪ Não produzido" for c in counts]
           lines += [f"| **Total de ocorrências** | **{values[0]}** | **{values[1]}** |", "",
-                    "As contagens representam ocorrências por pacote e alvo. Remover root não corrige os pacotes da base histórica."]
+                    "As contagens representam ocorrências por pacote e alvo. O depois atualiza a base e remove root; a atualização de pacotes é o que pode reduzir CVEs, não a troca do usuário."]
+          comparison = read_json("trivy-comparison.json")
+          if isinstance(comparison, dict):
+              delta = comparison["counts"]
+              lines += ["", "### Efeito da atualização da base", "",
+                        "| Comparação dos achados por pacote e identificador | Quantidade |", "|---|---|",
+                        f"| 🟢 Não detectados no depois | {delta['not_detected_after']} |",
+                        f"| {'🔴' if delta['persistent'] else '🟢'} Persistentes | {delta['persistent']} |",
+                        f"| {'🔴' if delta['newly_detected_after'] else '🟢'} Detectados somente no depois | {delta['newly_detected_after']} |", "",
+                        "Não detectado depois não prova correção individual. Consulte os pacotes e versões nos SBOMs e o detalhamento em trivy-comparison.json."]
           selected = read_json("selected-finding.json")
           if isinstance(selected, dict) and isinstance(selected.get("finding"), dict):
               finding = selected["finding"]
@@ -568,7 +607,7 @@ jobs:
               "sbom_after": ["sbom-after.cdx.json"],
               "trivy_before": ["trivy-before.txt", "trivy-before.json"],
               "trivy_after": ["trivy-after.txt", "trivy-after.json"],
-              "reports": ["command-logs/03-reports.log", "vulnerability.md", "screenshot.log"],
+              "reports": ["command-logs/03-reports.log", "vulnerability.md", "trivy-comparison.json", "screenshot.log"],
               "registry": ["command-logs/04-registry.log"],
               "publish": ["command-logs/05-publish.log", "push-after.txt", "signed-image.txt", "policy-published.json"],
               "sbom_published": ["sbom-published.cdx.json"],

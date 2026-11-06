@@ -8,7 +8,7 @@ Após uma execução bem-sucedida de **Supply chain**, baixar pelo Summary o art
 
 Antes de incluir os arquivos na entrega, o usuário deve confirmar o resultado remoto `success`, revisar os arquivos baixados e registrar no README da subpasta a URL da execução e o `analyzed_commit` de `manifest.json`. O usuário cuida do versionamento; a versão que incorpora as evidências deve ser distinguida da versão analisada. Preservar os originais e não alterar os JSONs para ajustar resultados.
 
-A imagem-base é histórica e intencionalmente vulnerável. O achado concreto só será conhecido após o scan. `trivy-before.png` é uma captura de navegador do relatório real produzido no runner, com a ficha do achado e a tabela. Não é uma captura da interface do GitHub.
+A imagem inicial usa uma base histórica, e a final usa uma base atualizada, ambas por digest. O achado concreto só será conhecido após o scan. `trivy-before.png` é uma captura de navegador do relatório real produzido no runner, com a ficha do achado e a tabela. Não é uma captura da interface do GitHub.
 
 ## Conferência dos entregáveis
 
@@ -17,10 +17,11 @@ A imagem-base é histórica e intencionalmente vulnerável. O achado concreto s�
 | Política testada | `opa-tests.txt`, `opa-coverage.json`, `policy-before.json` e `policy-after.json` |
 | SBOM gerado | `sbom-before.cdx.json`, `sbom-after.cdx.json` e `sbom-published.cdx.json` |
 | Vulnerabilidade real e print | `trivy-before.json`, `trivy-before.txt`, `selected-finding.json`, `vulnerability.md` e `trivy-before.png` |
+| Comparação antes/depois | `trivy-before.json`, `trivy-after.json`, `trivy-comparison.json` e os dois SBOMs |
 | Assinatura e verificação | `signed-image.txt`, `cosign-sign.txt`, `cosign-verify.json`, `cosign-sbom.json` e `trusted-identity.txt` |
 | Rejeição da variante | `tampered-image.txt`, `cosign-tampered.stderr`, `cosign-tampered.exit-code` e `tampered-assertion.txt` |
 | Comandos shell capturados | `command-logs/*.log`; registros nativos das Actions `uses:` ficam na execução |
-| Rastreabilidade | `manifest.json`, `tool-versions.txt`, locks e `base-image.txt` |
+| Rastreabilidade | `manifest.json`, `tool-versions.txt`, locks, `base-image.txt` e `base-image-after.txt` |
 
 As assinaturas e atestações são publicadas no registry; os artifacts preservam os relatórios da operação e da verificação, não um pacote de verificação offline. Manter as imagens e seus dados de assinatura disponíveis para a avaliação.
 

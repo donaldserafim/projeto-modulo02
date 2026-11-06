@@ -1,5 +1,5 @@
-# Base historica de laboratorio: CVEs sao intencionais; nao usar em producao.
-FROM alpine:3.18.0@sha256:02bb6f428431fbc2809c5d1b41eab5a68350194fb508869a33cb1af4444c9b11
+# Base atualizada e fixada por digest; validar os CVEs no GitHub Actions.
+FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 RUN printf "alteracao de laboratorio\n" > /tampered-marker
 USER 10001:10001
 ENTRYPOINT ["/bin/sh", "-ec", "printf 'Raio-X da Cadeia de Suprimentos\\n'; printf 'uid=%s gid=%s\\n' \"$(id -u)\" \"$(id -g)\""]
